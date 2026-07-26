@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atelier · Image Generations</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"></div>
+          <div>
+            <h1>Atelier</h1>
+            <p class="brand-sub">Image Generations · OpenAI-compatible</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div id="connection-pill" class="pill pill-muted" title="上游连接状态">未配置 Provider</div>
+          <button id="btn-settings" class="ui-btn ui-btn--default" type="button" aria-haspopup="dialog">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            设置
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="panel panel-left" aria-label="生成参数">
+          <form id="gen-form" class="gen-form">
+            <div class="field">
+              <label>模式</label>
+              <div id="mode-toggle" class="mode-toggle" role="tablist" aria-label="生成模式">
+                <button type="button" class="mode-toggle__btn is-active" data-mode="generate" role="tab" aria-selected="true">文生图</button>
+                <button type="button" class="mode-toggle__btn" data-mode="edit" role="tab" aria-selected="false">图片编辑</button>
+              </div>
+              <p class="hint" id="mode-hint">Generations · 纯文生图</p>
+            </div>
+
+            <div id="edit-assets-panel" class="field edit-assets hidden">
+              <div class="label-row">
+                <label>编辑参考图</label>
+                <div class="edit-assets__actions">
+                  <span class="meta" id="edit-assets-count">0 / 8</span>
+                  <button id="btn-edit-upload" class="ui-btn ui-btn--default" type="button">上传</button>
+                  <button id="btn-edit-clear" class="ui-btn ui-btn--default" type="button">清空</button>
+                </div>
+              </div>
+              <div id="edit-assets-list" class="edit-assets__list" aria-label="编辑参考图列表"></div>
+              <input id="edit-file-input" type="file" accept="image/*" multiple hidden />
+              <p class="hint">支持拖拽 / ⌘V 粘贴 / 点击上传，也可从右侧结果加入 · 最多 8 张</p>
+            </div>
+
+            <div class="field">
+              <div class="label-row">
+                <label for="prompt">Prompt</label>
+                <button id="btn-prompt-history" class="ui-btn ui-btn--default" type="button">历史 Prompt</button>
+              </div>
+              <textarea
+                id="prompt"
+                name="prompt"
+                rows="7"
+                placeholder="描述画面：傍晚的和室，纸灯笼暖光，电影静帧，细腻胶片质感…"
+                required
+              ></textarea>
+            </div>
+
+            <div class="field">
+              <div class="label-row">
+                <label>模型</label>
+                <button id="btn-refresh-models" class="ui-btn ui-btn--default" type="button">刷新列表</button>
+              </div>
+              <div id="model-select"></div>
+              <p class="hint">使用当前生效 Provider 拉取的文生图模型</p>
+            </div>
+
+            <div class="grid-2">
+              <div class="field">
+                <label>尺寸 size</label>
+                <div id="size-select"></div>
+              </div>
+              <div class="field">
+                <label for="n">数量 n</label>
+                <input id="n" name="n" type="number" min="1" max="10" value="1" />
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <div class="field">
+                <label>quality</label>
+                <div id="quality-select"></div>
+              </div>
+              <div class="field">
+                <label>response_format</label>
+                <div id="response-format-select"></div>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>style（可选）</label>
+              <div id="style-select"></div>
+            </div>
+
+            <details class="advanced">
+              <summary>高级 / 透传参数</summary>
+              <div class="field">
+                <label for="extra-json">额外 JSON（merge 进请求体）</label>
+                <textarea
+                  id="extra-json"
+                  rows="4"
+                  spellcheck="false"
+                  placeholder='{"background":"transparent"}'
+                ></textarea>
+                <p class="hint">不同上游扩展字段，需为合法 JSON 对象</p>
+              </div>
+            </details>
+
+            <div class="form-actions">
+              <button id="btn-generate" class="ui-btn ui-btn--confirm" type="submit">
+                <span class="btn-label">生成图片</span>
+              </button>
+              <button id="btn-clear-gallery" class="ui-btn ui-btn--default" type="button">清空结果</button>
+            </div>
+
+            <div id="form-error" class="banner banner-error hidden" role="alert"></div>
+            <div id="form-toast" class="banner banner-ok hidden" role="status"></div>
+          </form>
+        </section>
+
+        <section class="panel panel-right" aria-label="生成结果">
+          <div class="panel-header">
+            <div>
+              <h2>生成结果</h2>
+              <p class="panel-note" id="panel-note">点击图片预览 · 可回填参数、加入编辑、保存或删除</p>
+            </div>
+            <span id="result-meta" class="meta">等待生成</span>
+          </div>
+
+          <div id="status-bar" class="status-bar hidden">
+            <div class="spinner" aria-hidden="true"></div>
+            <span id="status-text">正在请求上游…</span>
+          </div>
+
+          <div id="gallery" class="gallery">
+            <div class="empty-state" id="empty-state">
+              <h3>还没有图片</h3>
+              <p>先配置 Provider，填写 Prompt，再点「生成图片」。结果会出现在这里。</p>
+              <div class="empty-actions">
+                <button id="btn-empty-settings" class="ui-btn ui-btn--confirm" type="button">打开设置</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Settings modal -->
+    <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="modal-backdrop" data-close-modal></div>
+      <div class="modal-card modal-card--wide">
+        <div class="modal-header">
+          <div>
+            <h2 id="settings-title">设置</h2>
+            <p class="modal-sub">配置 Provider，拉取模型，管理本地偏好</p>
+          </div>
+          <button class="ui-btn ui-btn--default ui-btn--icon" type="button" data-close-modal aria-label="关闭">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body settings-body">
+          <div class="settings-grid">
+            <div class="settings-col settings-col--list">
+              <div class="label-row">
+                <h3 class="block-title">Providers</h3>
+                <button id="btn-add-provider" class="ui-btn ui-btn--default" type="button">新增</button>
+              </div>
+              <ul id="provider-list" class="provider-list" aria-label="Provider 列表"></ul>
+              <p id="data-dir-hint" class="hint">本地目录：-</p>
+            </div>
+
+            <div class="settings-col settings-col--editor">
+              <div class="settings-editor-head">
+                <div>
+                  <h3 class="block-title" id="provider-editor-title">编辑 Provider</h3>
+                  <p class="hint" id="provider-editor-hint">从左侧选择一项，或点击「新增」</p>
+                </div>
+                <span id="provider-editor-badge" class="badge badge-other hidden">新建中</span>
+              </div>
+
+              <form id="provider-form" class="provider-form" autocomplete="off">
+                <div class="field">
+                  <label for="provider-name">名称</label>
+                  <input id="provider-name" type="text" placeholder="例如 OpenAI / 自建代理" />
+                </div>
+                <div class="field">
+                  <label for="base-url">BaseURL</label>
+                  <input id="base-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="field">
+                  <label for="api-key">API Key</label>
+                  <div class="input-with-action">
+                    <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                    <button id="btn-toggle-key" class="ui-btn ui-btn--default" type="button">显示</button>
+                  </div>
+                </div>
+
+                <div class="provider-actions">
+                  <button id="btn-delete-provider" class="ui-btn ui-btn--danger" type="button">删除</button>
+                  <div class="provider-actions__main">
+                    <button id="btn-activate-provider" class="ui-btn ui-btn--default" type="button">设为生效</button>
+                    <button id="btn-save-provider" class="ui-btn ui-btn--confirm" type="submit">保存</button>
+                  </div>
+                </div>
+              </form>
+
+              <div class="provider-followup">
+                <div class="provider-followup__text">
+                  <p class="hint" id="active-provider-hint">生效 Provider：未设置</p>
+                  <p class="hint">拉取模型使用「当前生效」的 Provider，不是左侧仅选中未生效的项。</p>
+                </div>
+                <button id="btn-fetch-models" class="ui-btn ui-btn--default" type="button">拉取模型</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="settings-status" class="banner hidden" role="status"></div>
+
+          <div class="models-box">
+            <div class="label-row">
+              <h3 class="block-title">模型识别结果</h3>
+              <label class="checkbox">
+                <input id="show-all-models" type="checkbox" />
+                <span>显示全部模型</span>
+              </label>
+            </div>
+            <div id="models-summary" class="meta">尚未拉取</div>
+            <ul id="models-list" class="models-list"></ul>
+          </div>
+
+          <section class="settings-section settings-section--prefs" aria-label="偏好设置">
+            <div class="settings-section__head">
+              <h3 class="block-title">偏好设置</h3>
+              <p class="hint">与 Provider 无关的本地行为</p>
+            </div>
+            <label class="switch-row">
+              <span>
+                <strong>自动保存图片到本地</strong>
+                <em class="hint">开启后每次生图默认写入 data/images</em>
+              </span>
+              <input id="auto-save-images" type="checkbox" />
+            </label>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt history modal -->
+    <div id="prompt-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="prompt-modal-title">
+      <div class="modal-backdrop" data-close-prompt-modal></div>
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <h2 id="prompt-modal-title">历史 Prompt</h2>
+            <p class="modal-sub">点击一条查看完整内容</p>
+          </div>
+          <button class="ui-btn ui-btn--default ui-btn--icon" type="button" data-close-prompt-modal aria-label="关闭">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="label-row">
+            <span class="meta" id="prompt-count">0 条</span>
+            <button id="btn-clear-prompts" class="ui-btn ui-btn--default" type="button">清空历史</button>
+          </div>
+          <ul id="prompt-history-list" class="prompt-list"></ul>
+          <div id="prompt-empty" class="empty-mini hidden">还没有历史 Prompt</div>
+        </div>
+      </div>
+    </div>
+
+
+
+    <!-- Prompt detail modal -->
+    <div id="prompt-detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="prompt-detail-title">
+      <div class="modal-backdrop" data-close-prompt-detail></div>
+      <div class="modal-card modal-card--prompt-detail">
+        <div class="modal-header">
+          <div>
+            <h2 id="prompt-detail-title">Prompt 详情</h2>
+            <p class="modal-sub">可使用或删除该历史记录</p>
+          </div>
+          <button class="ui-btn ui-btn--default ui-btn--icon" type="button" data-close-prompt-detail aria-label="关闭">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body prompt-detail-body">
+          <div id="prompt-detail-text" class="prompt-detail-text"></div>
+          <div class="prompt-detail-actions">
+            <button id="btn-prompt-detail-delete" class="ui-btn ui-btn--danger" type="button">删除</button>
+            <button id="btn-prompt-detail-use" class="ui-btn ui-btn--confirm" type="button">使用</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirm dialog -->
+    <div id="confirm-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <div class="modal-backdrop" data-close-confirm></div>
+      <div class="modal-card modal-card--confirm">
+        <div class="modal-header">
+          <div>
+            <h2 id="confirm-title">确认删除</h2>
+            <p class="modal-sub" id="confirm-message">删除后无法从结果区恢复，确定继续？</p>
+          </div>
+        </div>
+        <div class="modal-body confirm-body">
+          <div class="confirm-actions">
+            <button id="btn-confirm-cancel" class="ui-btn ui-btn--default" type="button" data-close-confirm>取消</button>
+            <button id="btn-confirm-ok" class="ui-btn ui-btn--danger" type="button">删除</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lightbox -->
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+      <div class="lightbox-backdrop" data-close-lightbox></div>
+      <div class="lightbox-stage">
+        <img id="lightbox-img" alt="preview" />
+      </div>
+      <button class="ui-btn ui-btn--default ui-btn--icon lightbox-close" type="button" data-close-lightbox aria-label="关闭预览">×</button>
+    </div>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

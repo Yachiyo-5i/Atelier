@@ -1,0 +1,30 @@
+{
+  "name": "image-generations",
+  "version": "1.0.0",
+  "description": "Simple full-stack text-to-image client with OpenAI-compatible API",
+  "type": "module",
+  "bin": {
+    "atelier": "server/index.js"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "build": "node scripts/build-binary.mjs",
+    "build:binary": "node scripts/build-binary.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.2.0"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.21.0",
+    "esbuild": "^0.25.5"
+  },
+  "pkg": {
+    "assets": [
+      "build/public/**/*"
+    ],
+    "outputPath": "dist"
+  }
+}

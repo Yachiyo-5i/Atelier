@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+.env
+*.log
+data/config.json
+data/prompts.json
+data/images/*
+!data/images/.gitkeep
+build/
+dist/
+*.tgz
+.claude/settings.local.json
+src-tauri/target/
+src-tauri/binaries/
