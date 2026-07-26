@@ -33,7 +33,9 @@ jobs:
       - name: Build universal backend sidecar
         run: node scripts/build-sidecar-universal.mjs
 
-      # Unsigned unless APPLE_* secrets are configured (Developer ID + notarization)
+      # Unsigned unless APPLE_* secrets are configured (Developer ID + notarization).
+      # Missing secrets expand to "" — unset them or the bundler tries to
+      # import an empty cert into the keychain and fails.
       - name: Build universal app
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -42,7 +44,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx tauri build --target universal-apple-darwin --config src-tauri/tauri.universal.conf.json
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          npx tauri build --target universal-apple-darwin --config src-tauri/tauri.universal.conf.json
 
       # upload-artifact strips exec bits — zip the .app with ditto to keep them
       - name: Zip .app
