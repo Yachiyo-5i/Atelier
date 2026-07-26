@@ -732,6 +732,7 @@ async function materializeImages(images, { shouldSave = false, meta = {}, apiKey
           meta: {
             ...meta,
             ...(remoteUrl ? { remoteUrl } : {}),
+            ...(img.revised_prompt ? { revisedPrompt: img.revised_prompt } : {}),
           },
           apiKey,
           authOrigin,

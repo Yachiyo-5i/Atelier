@@ -126,7 +126,7 @@ function libraryRecordToItem(rec) {
     model: meta.model || params?.model || '',
     size: meta.size || params?.size || '',
     prompt: meta.prompt || params?.prompt || '',
-    revisedPrompt: '',
+    revisedPrompt: meta.revisedPrompt || '',
     createdAt: rec.createdAt || 0,
     params: params || {
       prompt: meta.prompt || '',
