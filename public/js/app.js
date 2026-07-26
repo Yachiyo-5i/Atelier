@@ -1,10 +1,6 @@
 import { FancySelect } from './select.js';
 import { buttonClass } from './button.js';
 
-const GALLERY_KEY = 'image_generations_gallery_v1';
-const GALLERY_DB_NAME = 'image_generations_db';
-const GALLERY_DB_VERSION = 1;
-const GALLERY_STORE = 'kv';
 const MAX_GALLERY = 24;
 
 const MAX_EDIT_ASSETS = 8;
@@ -114,65 +110,57 @@ let toastTimer = null;
 let statusTimer = null;
 let statusStartedAt = 0;
 
-// ---------- IndexedDB gallery cache (browser) ----------
+// ---------- Server-backed gallery (data/images is the source of truth) ----------
 
-function openGalleryDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(GALLERY_DB_NAME, GALLERY_DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(GALLERY_STORE)) {
-        db.createObjectStore(GALLERY_STORE, { keyPath: 'key' });
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
-  });
-}
-
-function idbGet(key) {
-  return openGalleryDb().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction(GALLERY_STORE, 'readonly');
-        const req = tx.objectStore(GALLERY_STORE).get(key);
-        req.onsuccess = () => resolve(req.result?.value);
-        req.onerror = () => reject(req.error || new Error('IndexedDB get failed'));
-      }),
-  );
-}
-
-function idbSet(key, value) {
-  return openGalleryDb().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction(GALLERY_STORE, 'readwrite');
-        tx.objectStore(GALLERY_STORE).put({ key, value });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error || new Error('IndexedDB set failed'));
-      }),
-  );
+function libraryRecordToItem(rec) {
+  const meta = rec.meta || {};
+  const params = meta.params && typeof meta.params === 'object' ? meta.params : null;
+  return {
+    id: rec.id,
+    src: rec.localUrl,
+    originalSrc: rec.localUrl,
+    remoteUrl: '',
+    b64_json: '',
+    kind: 'local',
+    mode: meta.mode || params?.mode || 'generate',
+    model: meta.model || params?.model || '',
+    size: meta.size || params?.size || '',
+    prompt: meta.prompt || params?.prompt || '',
+    revisedPrompt: '',
+    createdAt: rec.createdAt || 0,
+    params: params || {
+      prompt: meta.prompt || '',
+      model: meta.model || '',
+      size: meta.size || '',
+      mode: meta.mode || 'generate',
+    },
+    local: {
+      id: rec.id,
+      filename: rec.filename,
+      localUrl: rec.localUrl,
+      downloadUrl: rec.downloadUrl,
+      saved: !rec.temp,
+      temp: Boolean(rec.temp),
+      materialized: true,
+    },
+  };
 }
 
 async function loadGallery() {
   try {
-    const fromIdb = await idbGet(GALLERY_KEY);
-    if (Array.isArray(fromIdb)) {
-      state.gallery = fromIdb.slice(0, MAX_GALLERY);
-      await reconcileGalleryLocalFiles();
+    const res = await fetch(`/api/images?limit=${MAX_GALLERY}`);
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.data)) {
+      // Keep transient (non-materialized) items from this session on top.
+      const transient = state.gallery.filter((item) => !item.local?.id);
+      state.gallery = [...transient, ...data.data.map(libraryRecordToItem)].slice(
+        0,
+        MAX_GALLERY,
+      );
       return;
     }
   } catch (err) {
     console.warn('load gallery failed', err);
-  }
-  state.gallery = [];
-}
-
-async function persistGallery() {
-  try {
-    await idbSet(GALLERY_KEY, state.gallery.slice(0, MAX_GALLERY));
-  } catch (err) {
-    console.warn('persist gallery failed', err);
   }
 }
 
@@ -230,11 +218,6 @@ function durableSrcCandidates(item) {
   return [...new Set(list.filter((s) => s && isBrowserSafeImageSrc(s)))];
 }
 
-function itemFallbackSrcs(item) {
-  // No ephemeral CDN fallbacks — those 403 and cause flicker loops.
-  return durableSrcCandidates(item);
-}
-
 function scrubGalleryItem(item) {
   if (!item || typeof item !== 'object') return item;
   const durable = durableSrcCandidates(item);
@@ -257,63 +240,6 @@ function scrubGalleryItem(item) {
     // retain remoteUrl only as opaque metadata for server save; not for <img>
   }
   return item;
-}
-
-async function checkLocalImageExists(id) {
-  if (!id) return false;
-  try {
-    const res = await fetch(`/api/images/local/${encodeURIComponent(id)}/meta`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * If gallery KV points at deleted local files, fall back to original/base64
- * and clear the "saved" flag so UI does not show 404 forever.
- * Also rewrite ephemeral CDN urls (imgen.x.ai 403) off the primary src.
- */
-async function reconcileGalleryLocalFiles() {
-  let changed = false;
-
-  // Hard scrub any cached CDN urls from IDB gallery (stops 403 flicker).
-  for (const item of state.gallery) {
-    const before = `${item.src || ''}|${item.originalSrc || ''}`;
-    scrubGalleryItem(item);
-    const after = `${item.src || ''}|${item.originalSrc || ''}`;
-    if (before !== after) changed = true;
-  }
-
-  await Promise.all(
-    state.gallery.map(async (item) => {
-      if (!item?.local?.saved || !item.local?.id) return;
-
-      const exists = await checkLocalImageExists(item.local.id);
-      if (exists) {
-        // ensure src prefers valid local path
-        const localUrl = item.local.localUrl || `/api/images/local/${item.local.id}`;
-        if (!item.src || !isLocalApiSrc(item.src) || isEphemeralImageUrl(item.src)) {
-          item.src = localUrl;
-          changed = true;
-        }
-        return;
-      }
-
-      const fallback = itemFallbackSrcs(item)[0] || '';
-      item.local = { saved: false, missing: true, lostId: item.local.id };
-      item.src = fallback;
-      item.note = fallback ? '' : '本地文件已删除，且无可回退预览';
-      changed = true;
-    }),
-  );
-
-  if (changed) {
-    await persistGallery();
-  }
 }
 
 function markLocalMissing(item, nextSrc = '') {
@@ -357,7 +283,6 @@ function attachImageWithFallback(shot, item) {
       // Local file missing — clear saved flag, but do NOT jump to CDN.
       const nextSafe = chain.slice(index + 1).find((s) => isBrowserSafeImageSrc(s)) || '';
       markLocalMissing(item, nextSafe);
-      void persistGallery();
       updateShotLocalStatus(shot, item);
     }
 
@@ -380,7 +305,6 @@ function attachImageWithFallback(shot, item) {
     if (!item.local?.missing) {
       markLocalMissing(item, '');
     }
-    void persistGallery();
     const placeholder = createMissingEl(item.note || '图片不可用');
     img.replaceWith(placeholder);
     updateShotLocalStatus(shot, item);
@@ -421,14 +345,6 @@ function updateShotLocalStatus(shot, item) {
     status.className = `shot__status ${saved ? 'is-saved' : 'is-unsaved'}${missing ? ' is-lost' : ''}`;
     status.textContent = formatLocalStatusText(item);
   }
-}
-
-let galleryRefreshTimer = null;
-function scheduleGalleryRefresh() {
-  clearTimeout(galleryRefreshTimer);
-  galleryRefreshTimer = setTimeout(() => {
-    renderGallery();
-  }, 50);
 }
 
 // ---------- Config / providers ----------
@@ -1655,22 +1571,59 @@ function askConfirm({
   return openConfirmDialog({ title, message, confirmText: confirmLabel });
 }
 
-function removeGalleryItem(id) {
-  const next = state.gallery.filter((item) => item.id !== id);
-  if (next.length === state.gallery.length) return;
-  state.gallery = next;
-  void persistGallery();
+async function removeGalleryItem(id) {
+  const item = state.gallery.find((it) => it.id === id);
+  if (!item) return;
+
+  if (item.local?.id) {
+    try {
+      const res = await fetch(`/api/images/local/${encodeURIComponent(item.local.id)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok && res.status !== 404) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error?.message || `删除失败 (HTTP ${res.status})`);
+      }
+    } catch (err) {
+      showFormError(err.message || '删除失败');
+      return;
+    }
+  }
+
+  state.gallery = state.gallery.filter((it) => it.id !== id);
   renderGallery();
   showFormToast('已删除该结果');
 }
 
+/** Delete every temp (unsaved) image server-side. Returns removed count. */
+async function clearUnsavedImages() {
+  let removed = 0;
+  for (let guard = 0; guard < 20; guard += 1) {
+    const res = await fetch('/api/images?limit=200');
+    const data = await res.json();
+    if (!res.ok || !Array.isArray(data.data)) break;
+    const temps = data.data.filter((r) => r.temp);
+    if (!temps.length) break;
+    for (const rec of temps) {
+      const del = await fetch(`/api/images/local/${encodeURIComponent(rec.id)}`, {
+        method: 'DELETE',
+      });
+      if (del.ok) removed += 1;
+    }
+  }
+  return removed;
+}
+
 async function requestDeleteGalleryItem(id) {
+  const item = state.gallery.find((it) => it.id === id);
   const ok = await openConfirmDialog({
     title: '确认删除',
-    message: '删除后将从结果区移除，确定继续？',
+    message: item?.local?.id
+      ? '将同时删除本地文件，删除后不可恢复，确定继续？'
+      : '删除后将从结果区移除，确定继续？',
     confirmText: '删除',
   });
-  if (ok) removeGalleryItem(id);
+  if (ok) await removeGalleryItem(id);
 }
 
 async function saveItemLocally(item) {
@@ -1678,6 +1631,22 @@ async function saveItemLocally(item) {
     showFormToast('已保存在本地');
     return;
   }
+
+  // Temp-materialized file → just promote server-side, no re-upload.
+  if (item.local?.id && item.local?.temp && !item.local?.missing) {
+    const res = await fetch('/api/images/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ localId: item.local.id }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error?.message || '保存失败');
+    item.local = { ...item.local, ...data.local };
+    renderGallery();
+    showFormToast('已保存到本地目录');
+    return;
+  }
+
   const payload = {};
   if (item.originalSrc?.startsWith('data:') || item.kind === 'b64_json') {
     // prefer raw base64 if we kept it
@@ -1721,7 +1690,6 @@ async function saveItemLocally(item) {
   if (data.local?.localUrl) {
     item.src = data.local.localUrl;
   }
-  await persistGallery();
   renderGallery();
   showFormToast('已保存到本地目录');
 }
@@ -2040,8 +2008,11 @@ async function onGenerate(event) {
       return scrubGalleryItem(item);
     });
 
-    state.gallery = [...newItems, ...state.gallery].slice(0, MAX_GALLERY);
-    await persistGallery();
+    // Materialized results live server-side; refresh from library. Items that
+    // failed to materialize (b64/error only) are kept as session-transient.
+    const transientItems = newItems.filter((i) => !i.local?.id);
+    state.gallery = [...transientItems, ...state.gallery].slice(0, MAX_GALLERY);
+    await loadGallery();
     renderGallery();
     const savedN = newItems.filter((i) => i.local?.saved).length;
     const verb = mode === 'edit' ? '编辑' : '生成';
@@ -2381,11 +2352,22 @@ function bindEvents() {
   els.form.addEventListener('submit', onGenerate);
 
   els.btnClearGallery.addEventListener('click', async () => {
-    state.gallery = [];
-    await persistGallery();
-    renderGallery();
-    showFormError('');
-    hideFormToast();
+    const ok = await openConfirmDialog({
+      title: '清理未保存图片？',
+      message: '将删除所有「未保存」的临时图片文件；已保存的图片会保留在本地目录。',
+      confirmText: '清理',
+    });
+    if (!ok) return;
+    try {
+      const removed = await clearUnsavedImages();
+      state.gallery = state.gallery.filter((i) => i.local?.id && !i.local?.temp);
+      await loadGallery();
+      renderGallery();
+      showFormError('');
+      showFormToast(removed ? `已清理 ${removed} 张未保存图片` : '没有需要清理的图片');
+    } catch (err) {
+      showFormError(err.message || '清理失败');
+    }
   });
 
   els.btnClearPrompts.addEventListener('click', async () => {
