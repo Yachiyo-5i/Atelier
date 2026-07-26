@@ -1,7 +1,7 @@
 import express from 'express';
-import cors from 'cors';
 import path from 'path';
 import fs from 'fs/promises';
+import { timingSafeEqual } from 'crypto';
 import multer from 'multer';
 import {
   ensureDataDirs,
@@ -15,20 +15,77 @@ import {
   saveImageFromSource,
   downloadRemoteImage,
   getLocalImage,
+  listLocalImages,
+  deleteLocalImage,
+  promoteLocalImage,
+  cleanupTempImages,
   DATA_DIR,
 } from './store.js';
 import { getPublicDir, getAppHome, isPackaged } from './paths.js';
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+// PORT=0 → OS-assigned port (desktop shell mode); real port is printed on ready.
+const PORT = process.env.PORT !== undefined ? Number(process.env.PORT) : 3000;
+// Loopback by default: this server holds API keys and must not face the LAN.
+const HOST = process.env.HOST || '127.0.0.1';
+const AUTH_TOKEN = process.env.ATELIER_TOKEN || '';
+const TOKEN_COOKIE = 'atelier_token';
 const PUBLIC_DIR = getPublicDir();
+
+const UPSTREAM_TIMEOUT_MS = Number(process.env.ATELIER_UPSTREAM_TIMEOUT_MS) || 180_000;
+const MODELS_TIMEOUT_MS = 30_000;
 
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 30 * 1024 * 1024, files: 8 },
 });
 
-app.use(cors());
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || '').split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+/**
+ * Token gate for the desktop shell. When ATELIER_TOKEN is set, every request
+ * must carry the token via header, cookie, or one-time ?token= query (the
+ * shell opens /?token=xxx; we convert it to a cookie so <img> and static
+ * loads work without headers). Without ATELIER_TOKEN (plain web/dev mode)
+ * this middleware is a no-op.
+ */
+app.use((req, res, next) => {
+  if (!AUTH_TOKEN) return next();
+
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
+  if (queryToken && safeEqual(queryToken, AUTH_TOKEN)) {
+    res.cookie
+      ? res.cookie(TOKEN_COOKIE, AUTH_TOKEN, { httpOnly: true, sameSite: 'strict' })
+      : res.setHeader(
+          'Set-Cookie',
+          `${TOKEN_COOKIE}=${encodeURIComponent(AUTH_TOKEN)}; HttpOnly; SameSite=Strict; Path=/`,
+        );
+    return next();
+  }
+
+  const headerToken = String(req.headers['x-atelier-token'] || '');
+  if (headerToken && safeEqual(headerToken, AUTH_TOKEN)) return next();
+
+  const cookieToken = parseCookies(req.headers.cookie)[TOKEN_COOKIE] || '';
+  if (cookieToken && safeEqual(cookieToken, AUTH_TOKEN)) return next();
+
+  return res.status(401).json({ error: { message: 'Unauthorized: missing or invalid token' } });
+});
+
 app.use(express.json({ limit: '40mb' }));
 app.use(express.static(PUBLIC_DIR));
 
@@ -59,7 +116,12 @@ async function resolveUpstream(req) {
     (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
 
   if (headerBase && headerKey) {
-    return { baseUrl: String(headerBase), apiKey: String(headerKey), source: 'header' };
+    return {
+      baseUrl: String(headerBase),
+      apiKey: String(headerKey),
+      authOrigin: originOf(headerBase),
+      source: 'header',
+    };
   }
 
   const provider = await getActiveProvider();
@@ -76,9 +138,49 @@ async function resolveUpstream(req) {
   return {
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
+    authOrigin: originOf(provider.baseUrl),
     source: 'active',
     provider,
   };
+}
+
+function originOf(baseUrl) {
+  try {
+    return new URL(normalizeBaseUrl(baseUrl)).origin;
+  } catch {
+    return '';
+  }
+}
+
+/** Loopback / private / link-local hosts the image proxy must never touch. */
+function isPrivateHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  if (host === 'metadata.google.internal') return true;
+  // IPv6
+  if (host.includes(':')) {
+    const h = host.replace(/^\[|\]$/g, '');
+    return (
+      h === '::' ||
+      h === '::1' ||
+      h.startsWith('fe80:') ||
+      h.startsWith('fc') ||
+      h.startsWith('fd') ||
+      h.startsWith('::ffff:')
+    );
+  }
+  // IPv4 literals
+  const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a >= 224) return true;
+  }
+  return false;
 }
 
 async function readUpstreamBody(response) {
@@ -159,13 +261,12 @@ function normalizeOneImage(item) {
   }
   if (typeof item !== 'object') return null;
 
-  const url =
-    item.url ||
-    item.image_url ||
-    item.imageUrl ||
-    item.image ||
-    item.src ||
-    (typeof item.image_url === 'object' ? item.image_url?.url : undefined);
+  // image_url may be a string or an object like { url: "..." }
+  const imageUrlField =
+    typeof item.image_url === 'object' && item.image_url
+      ? item.image_url.url
+      : item.image_url;
+  const url = item.url || imageUrlField || item.imageUrl || item.image || item.src;
 
   const b64 =
     item.b64_json ||
@@ -395,6 +496,7 @@ app.get('/api/models', async (req, res) => {
         Authorization: `Bearer ${upstream.apiKey}`,
         'Content-Type': 'application/json',
       },
+      signal: AbortSignal.timeout(MODELS_TIMEOUT_MS),
     });
 
     const data = await readUpstreamBody(response);
@@ -443,10 +545,10 @@ app.post('/api/images/generations', async (req, res) => {
     }
 
     const body = {
+      ...payload,
       model: payload.model || 'dall-e-3',
       prompt: String(payload.prompt).trim(),
       n: payload.n ?? 1,
-      ...payload,
     };
     Object.keys(body).forEach((key) => {
       if (body[key] === undefined || body[key] === '') delete body[key];
@@ -466,6 +568,7 @@ app.post('/api/images/generations', async (req, res) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     });
 
     // Some gateways reject b64_json — fall back once without it / with url.
@@ -487,6 +590,7 @@ app.post('/api/images/generations', async (req, res) => {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(retryBody),
+          signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
         });
         // keep body.response_format for echo as what we actually use
         if (response.ok) delete body.response_format;
@@ -516,6 +620,7 @@ app.post('/api/images/generations', async (req, res) => {
     images = await materializeImages(images, {
       shouldSave,
       apiKey: upstream.apiKey,
+      authOrigin: upstream.authOrigin,
       meta: {
         mode: 'generate',
         model: body.model,
@@ -577,25 +682,22 @@ function isRemoteHttpUrl(url) {
   return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
 
-/**
- * Always materialize remote image URLs onto local disk so the browser never
- * depends on short-lived / hotlink-protected CDNs (e.g. imgen.x.ai → 403).
- * Pure base64 responses are saved only when shouldSave is true.
- */
 function proxyUrlForRemote(remoteUrl) {
   return `/api/images/proxy?url=${encodeURIComponent(remoteUrl)}`;
 }
 
 /**
- * Always materialize remote image URLs onto local disk so the browser never
+ * Always materialize returned image bytes onto local disk so the browser never
  * depends on short-lived / hotlink-protected CDNs (e.g. imgen.x.ai → 403).
- * Pure base64 responses are saved only when shouldSave is true.
+ * When shouldSave is false the file is written with temp=true — still
+ * displayable via /api/images/local/:id, but promotable/sweepable later —
+ * which is how autoSaveImages=false is honored without losing the bytes.
  *
  * Client-facing `url` is NEVER a third-party CDN link:
  *   local file → /api/images/local/:id
  *   fallback   → /api/images/proxy?url=...
  */
-async function materializeImages(images, { shouldSave = false, meta = {}, apiKey } = {}) {
+async function materializeImages(images, { shouldSave = false, meta = {}, apiKey, authOrigin } = {}) {
   if (!Array.isArray(images) || !images.length) return [];
 
   return Promise.all(
@@ -632,6 +734,8 @@ async function materializeImages(images, { shouldSave = false, meta = {}, apiKey
             ...(remoteUrl ? { remoteUrl } : {}),
           },
           apiKey,
+          authOrigin,
+          temp: !shouldSave,
         });
 
         return {
@@ -645,7 +749,8 @@ async function materializeImages(images, { shouldSave = false, meta = {}, apiKey
             filename: local.filename,
             localUrl: local.localUrl,
             downloadUrl: local.downloadUrl,
-            saved: true,
+            saved: shouldSave,
+            temp: !shouldSave,
             materialized: true,
           },
         };
@@ -689,7 +794,7 @@ async function materializeImages(images, { shouldSave = false, meta = {}, apiKey
   );
 }
 
-async function resolveEditImageSources({ files = [], refs = [], apiKey } = {}) {
+async function resolveEditImageSources({ files = [], refs = [], apiKey, authOrigin } = {}) {
   const out = [];
 
   for (const f of files) {
@@ -744,7 +849,7 @@ async function resolveEditImageSources({ files = [], refs = [], apiKey } = {}) {
         continue;
       }
       try {
-        const { buffer, mime } = await downloadRemoteImage(url, { apiKey });
+        const { buffer, mime } = await downloadRemoteImage(url, { apiKey, authOrigin });
         out.push({
           buffer,
           mime: mime || 'image/png',
@@ -810,6 +915,7 @@ async function handleImageEdits(req, res) {
       files,
       refs,
       apiKey: upstream.apiKey,
+      authOrigin: upstream.authOrigin,
     });
     if (!sources.length) {
       return res.status(400).json({
@@ -835,63 +941,91 @@ async function handleImageEdits(req, res) {
         files: [],
         refs: [body.mask],
         apiKey: upstream.apiKey,
+        authOrigin: upstream.authOrigin,
       });
       maskSource = maskList[0] || null;
     }
 
-    const form = new FormData();
-    form.append('prompt', prompt);
     const model = String(body.model || '').trim();
-    if (model) form.append('model', model);
-    if (body.n != null && body.n !== '') form.append('n', String(body.n));
-    if (body.size) form.append('size', String(body.size));
-    if (body.quality) form.append('quality', String(body.quality));
     // Prefer b64 — CDN urls from x.ai cannot be re-downloaded (403).
-    const editResponseFormat = body.response_format
-      ? String(body.response_format)
-      : 'b64_json';
-    form.append('response_format', editResponseFormat);
-    if (body.user) form.append('user', String(body.user));
+    const forcedB64 = !body.response_format;
+    let editResponseFormat = body.response_format ? String(body.response_format) : 'b64_json';
 
-    // Extra scalar fields (ignore known complex keys)
-    const reserved = new Set([
-      'prompt',
-      'model',
-      'n',
-      'size',
-      'quality',
-      'response_format',
-      'user',
-      'images',
-      'image',
-      'mask',
-      'baseUrl',
-      'apiKey',
-      'save',
-    ]);
-    for (const [k, v] of Object.entries(body)) {
-      if (reserved.has(k)) continue;
-      if (v == null || v === '') continue;
-      if (typeof v === 'object') continue;
-      form.append(k, String(v));
-    }
+    const buildForm = (responseFormat) => {
+      const form = new FormData();
+      form.append('prompt', prompt);
+      if (model) form.append('model', model);
+      if (body.n != null && body.n !== '') form.append('n', String(body.n));
+      if (body.size) form.append('size', String(body.size));
+      if (body.quality) form.append('quality', String(body.quality));
+      if (responseFormat) form.append('response_format', responseFormat);
+      if (body.user) form.append('user', String(body.user));
 
-    for (const src of sources) {
-      const blob = new Blob([src.buffer], { type: src.mime });
-      form.append('image', blob, src.filename);
-    }
-    if (maskSource) {
-      const blob = new Blob([maskSource.buffer], { type: maskSource.mime });
-      form.append('mask', blob, maskSource.filename);
-    }
+      // Extra scalar fields (ignore known complex keys)
+      const reserved = new Set([
+        'prompt',
+        'model',
+        'n',
+        'size',
+        'quality',
+        'response_format',
+        'user',
+        'images',
+        'image',
+        'mask',
+        'baseUrl',
+        'apiKey',
+        'save',
+      ]);
+      for (const [k, v] of Object.entries(body)) {
+        if (reserved.has(k)) continue;
+        if (v == null || v === '') continue;
+        if (typeof v === 'object') continue;
+        form.append(k, String(v));
+      }
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${upstream.apiKey}`,
-      },
-      body: form,
-    });
+      for (const src of sources) {
+        const blob = new Blob([src.buffer], { type: src.mime });
+        form.append('image', blob, src.filename);
+      }
+      if (maskSource) {
+        const blob = new Blob([maskSource.buffer], { type: maskSource.mime });
+        form.append('mask', blob, maskSource.filename);
+      }
+      return form;
+    };
+
+    const postEdit = (responseFormat) =>
+      fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${upstream.apiKey}`,
+        },
+        body: buildForm(responseFormat),
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+
+    let response = await postEdit(editResponseFormat);
+
+    // Mirror generations: some models (e.g. gpt-image-1) reject response_format.
+    if (!response.ok && forcedB64) {
+      const errBody = await readUpstreamBody(response);
+      const msg = JSON.stringify(errBody?.error || errBody || '').toLowerCase();
+      if (
+        response.status === 400 ||
+        msg.includes('response_format') ||
+        msg.includes('b64') ||
+        msg.includes('base64')
+      ) {
+        response = await postEdit('');
+        if (response.ok) editResponseFormat = '';
+      } else {
+        return res.status(response.status).json({
+          error: errBody?.error || errBody || { message: 'Image edit failed' },
+          status: response.status,
+        });
+      }
+    }
 
     const data = await readUpstreamBody(response);
     if (!response.ok) {
@@ -911,6 +1045,7 @@ async function handleImageEdits(req, res) {
     images = await materializeImages(images, {
       shouldSave,
       apiKey: upstream.apiKey,
+      authOrigin: upstream.authOrigin,
       meta: {
         mode: 'edit',
         model,
@@ -972,14 +1107,34 @@ app.post(
 );
 
 /**
- * Manual save of an image to local data/images
- * Body: { url?, b64_json?, meta? }
+ * Manual save of an image to local data/images.
+ * Body: { localId? } to promote a temp materialized image, or { url?, b64_json?, meta? }.
  */
 app.post('/api/images/save', async (req, res) => {
   try {
-    const { url, b64_json, meta } = req.body || {};
+    const { localId, url, b64_json, meta } = req.body || {};
+
+    if (localId) {
+      const local = await promoteLocalImage(String(localId));
+      if (!local) {
+        return res.status(404).json({ error: { message: 'Local image not found' } });
+      }
+      return res.json({
+        local: {
+          id: local.id,
+          filename: local.filename,
+          localUrl: local.localUrl,
+          downloadUrl: local.downloadUrl,
+          saved: true,
+          temp: false,
+          size: local.size,
+          mime: local.mime,
+        },
+      });
+    }
+
     if (!url && !b64_json) {
-      return res.status(400).json({ error: { message: 'url or b64_json required' } });
+      return res.status(400).json({ error: { message: 'localId, url or b64_json required' } });
     }
     const active = await getActiveProvider();
     const local = await saveImageFromSource({
@@ -987,6 +1142,7 @@ app.post('/api/images/save', async (req, res) => {
       b64_json,
       meta: meta || {},
       apiKey: active?.apiKey,
+      authOrigin: originOf(active?.baseUrl || ''),
     });
     res.status(201).json({
       local: {
@@ -995,12 +1151,41 @@ app.post('/api/images/save', async (req, res) => {
         localUrl: local.localUrl,
         downloadUrl: local.downloadUrl,
         saved: true,
+        temp: false,
         size: local.size,
         mime: local.mime,
       },
     });
   } catch (err) {
     res.status(500).json({ error: { message: err.message || 'Save failed' } });
+  }
+});
+
+/**
+ * Library: list materialized images (newest first).
+ * Query: offset, limit, includeTemp (default true), tempOnly
+ */
+app.get('/api/images', async (req, res) => {
+  try {
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const includeTemp = String(req.query.includeTemp || 'true').toLowerCase() !== 'false';
+    const { items, total } = await listLocalImages({ offset, limit, includeTemp });
+    res.json({ data: items, total, offset, limit });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
+  }
+});
+
+app.delete('/api/images/local/:id', async (req, res) => {
+  try {
+    const removed = await deleteLocalImage(String(req.params.id));
+    if (!removed) {
+      return res.status(404).json({ error: { message: 'Local image not found' } });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: { message: err.message } });
   }
 });
 
@@ -1058,9 +1243,15 @@ app.get('/api/images/proxy', async (req, res) => {
     if (!['http:', 'https:'].includes(parsed.protocol)) {
       return res.status(400).json({ error: { message: 'only http(s) allowed' } });
     }
+    if (isPrivateHost(parsed.hostname)) {
+      return res.status(400).json({ error: { message: 'private/internal hosts are not allowed' } });
+    }
 
     const active = await getActiveProvider();
-    const { buffer, mime } = await downloadRemoteImage(raw, { apiKey: active?.apiKey });
+    const { buffer, mime } = await downloadRemoteImage(raw, {
+      apiKey: active?.apiKey,
+      authOrigin: originOf(active?.baseUrl || ''),
+    });
     res.setHeader('Content-Type', mime || 'image/jpeg');
     res.setHeader('Cache-Control', 'private, max-age=300');
     res.setHeader('X-Image-Proxy', '1');
@@ -1077,17 +1268,21 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
-const HOST = process.env.HOST || '0.0.0.0';
-
 async function main() {
   await ensureDataDirs();
-  app.listen(PORT, HOST, () => {
-    console.log(`Image Generations server running at http://localhost:${PORT}`);
+  cleanupTempImages().then(
+    (n) => n && console.log(`Cleaned ${n} expired temp image(s)`),
+    () => {},
+  );
+  const server = app.listen(PORT, HOST, () => {
+    const actualPort = server.address().port;
+    console.log(`Image Generations server running at http://${HOST}:${actualPort}`);
     console.log(`App home: ${getAppHome()}`);
     console.log(`Data directory: ${DATA_DIR}`);
     console.log(`Public directory: ${PUBLIC_DIR}`);
     console.log(`Packaged: ${isPackaged()}`);
-    console.log(`ATELIER_READY port=${PORT}`);
+    console.log(`Auth: ${AUTH_TOKEN ? 'token required' : 'open (local dev)'}`);
+    console.log(`ATELIER_READY port=${actualPort}`);
   });
 }
 

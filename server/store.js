@@ -38,7 +38,7 @@ async function readJson(filePath, fallback) {
 }
 
 async function writeJson(filePath, data) {
-  const tmp = `${filePath}.${process.pid}.tmp`;
+  const tmp = `${filePath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
   await fs.rename(tmp, filePath);
 }
@@ -113,9 +113,11 @@ function extFromMime(mime) {
 
 /**
  * Save an image from url or base64 into data/images.
+ * `temp: true` marks images materialized only for display (autoSave off);
+ * they can be promoted later or swept by cleanupTempImages().
  * Returns local file metadata.
  */
-export async function saveImageBuffer({ buffer, mime, meta = {} }) {
+export async function saveImageBuffer({ buffer, mime, meta = {}, temp = false }) {
   await ensureDataDirs();
   const id = randomUUID();
   const ext = extFromMime(mime);
@@ -129,6 +131,7 @@ export async function saveImageBuffer({ buffer, mime, meta = {} }) {
     mime: mime || `image/${ext === 'jpg' ? 'jpeg' : ext}`,
     size: buffer.length,
     createdAt: Date.now(),
+    temp: Boolean(temp),
     meta,
   };
   await writeJson(path.join(IMAGES_DIR, `${id}.json`), record);
@@ -139,11 +142,89 @@ export async function saveImageBuffer({ buffer, mime, meta = {} }) {
   };
 }
 
+/** List saved images (metadata only), newest first. */
+export async function listLocalImages({ offset = 0, limit = 50, includeTemp = true } = {}) {
+  await ensureDataDirs();
+  let names = [];
+  try {
+    names = await fs.readdir(IMAGES_DIR);
+  } catch {
+    return { items: [], total: 0 };
+  }
+  const metaFiles = names.filter((n) => n.endsWith('.json'));
+  const records = [];
+  for (const name of metaFiles) {
+    const rec = await readJson(path.join(IMAGES_DIR, name), null);
+    if (!rec?.id || !rec?.filename) continue;
+    if (!includeTemp && rec.temp) continue;
+    records.push(rec);
+  }
+  records.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const page = records.slice(offset, offset + limit).map((rec) => ({
+    ...rec,
+    localUrl: `/api/images/local/${rec.id}`,
+    downloadUrl: `/api/images/local/${rec.id}?download=1`,
+  }));
+  return { items: page, total: records.length };
+}
+
+/** Delete a saved image (file + metadata). Returns true if anything was removed. */
+export async function deleteLocalImage(id) {
+  const meta = await readJson(path.join(IMAGES_DIR, `${id}.json`), null);
+  let removed = false;
+  if (meta?.filename && !meta.filename.includes('/') && !meta.filename.includes('..')) {
+    try {
+      await fs.unlink(path.join(IMAGES_DIR, meta.filename));
+      removed = true;
+    } catch {
+      /* file already gone */
+    }
+  }
+  try {
+    await fs.unlink(path.join(IMAGES_DIR, `${id}.json`));
+    removed = true;
+  } catch {
+    /* meta already gone */
+  }
+  return removed;
+}
+
+/** Promote a temp image to permanently saved. */
+export async function promoteLocalImage(id) {
+  const metaPath = path.join(IMAGES_DIR, `${id}.json`);
+  const meta = await readJson(metaPath, null);
+  if (!meta?.id) return null;
+  if (meta.temp) {
+    meta.temp = false;
+    await writeJson(metaPath, meta);
+  }
+  return {
+    ...meta,
+    localUrl: `/api/images/local/${id}`,
+    downloadUrl: `/api/images/local/${id}?download=1`,
+  };
+}
+
+/** Remove temp images older than maxAgeMs (default 7 days). */
+export async function cleanupTempImages(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
+  const { items } = await listLocalImages({ offset: 0, limit: Infinity, includeTemp: true });
+  const cutoff = Date.now() - maxAgeMs;
+  let removed = 0;
+  for (const rec of items) {
+    if (rec.temp && (rec.createdAt || 0) < cutoff) {
+      if (await deleteLocalImage(rec.id)) removed += 1;
+    }
+  }
+  return removed;
+}
+
 /**
  * Download a remote image. Many CDNs (e.g. imgen.x.ai) block bare/browserless
  * fetches or browser hotlinks — use browser-like headers and optional API key.
+ * The API key is only ever attached when the target host matches authOrigin
+ * (the provider's own origin) so arbitrary URLs can't exfiltrate it.
  */
-export async function downloadRemoteImage(url, { apiKey } = {}) {
+export async function downloadRemoteImage(url, { apiKey, authOrigin, timeoutMs = 60_000 } = {}) {
   if (!url || typeof url !== 'string') {
     throw new Error('url is required');
   }
@@ -169,6 +250,17 @@ export async function downloadRemoteImage(url, { apiKey } = {}) {
   } catch {
     /* ignore */
   }
+
+  // Never leak the provider key to unrelated hosts.
+  let allowedAuthHost = '';
+  try {
+    if (authOrigin) allowedAuthHost = new URL(authOrigin).hostname.toLowerCase();
+  } catch {
+    /* ignore */
+  }
+  const sameProviderHost =
+    allowedAuthHost && (host === allowedAuthHost || host.endsWith(`.${allowedAuthHost}`));
+  const authKey = sameProviderHost ? apiKey : undefined;
 
   const ua =
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -196,15 +288,15 @@ export async function downloadRemoteImage(url, { apiKey } = {}) {
         /* ignore */
       }
     }
-    if (apiKey) {
-      attempts.push({ ...base, Authorization: `Bearer ${apiKey}` });
+    if (authKey) {
+      attempts.push({ ...base, Authorization: `Bearer ${authKey}` });
     }
     attempts.push({ ...base });
   }
   // last resort: minimal headers
   attempts.push({ Accept: '*/*', 'User-Agent': ua });
-  if (apiKey) {
-    attempts.push({ Accept: '*/*', 'User-Agent': ua, Authorization: `Bearer ${apiKey}` });
+  if (authKey) {
+    attempts.push({ Accept: '*/*', 'User-Agent': ua, Authorization: `Bearer ${authKey}` });
   }
 
   let lastErr = null;
@@ -214,6 +306,7 @@ export async function downloadRemoteImage(url, { apiKey } = {}) {
         method: 'GET',
         headers,
         redirect: 'follow',
+        signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) {
         lastErr = new Error(`Failed to download image: HTTP ${res.status}`);
@@ -240,7 +333,14 @@ export async function downloadRemoteImage(url, { apiKey } = {}) {
   throw lastErr || new Error('Failed to download image');
 }
 
-export async function saveImageFromSource({ url, b64_json, meta = {}, apiKey } = {}) {
+export async function saveImageFromSource({
+  url,
+  b64_json,
+  meta = {},
+  apiKey,
+  authOrigin,
+  temp = false,
+} = {}) {
   if (b64_json) {
     let mime = 'image/png';
     let b64 = b64_json;
@@ -254,15 +354,15 @@ export async function saveImageFromSource({ url, b64_json, meta = {}, apiKey } =
       }
     }
     const buffer = Buffer.from(b64, 'base64');
-    return saveImageBuffer({ buffer, mime, meta });
+    return saveImageBuffer({ buffer, mime, meta, temp });
   }
 
   if (url) {
     if (url.startsWith('data:')) {
-      return saveImageFromSource({ b64_json: url, meta });
+      return saveImageFromSource({ b64_json: url, meta, temp });
     }
-    const { buffer, mime } = await downloadRemoteImage(url, { apiKey });
-    return saveImageBuffer({ buffer, mime, meta: { ...meta, remoteUrl: url } });
+    const { buffer, mime } = await downloadRemoteImage(url, { apiKey, authOrigin });
+    return saveImageBuffer({ buffer, mime, meta: { ...meta, remoteUrl: url }, temp });
   }
 
   throw new Error('url or b64_json is required to save image');
