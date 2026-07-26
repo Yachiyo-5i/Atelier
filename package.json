@@ -17,6 +17,7 @@
     "sidecar": "node scripts/build-binary.mjs && node scripts/prepare-sidecar.mjs",
     "desktop:dev": "npm run sidecar && tauri dev",
     "desktop:build": "npm run sidecar && tauri build",
+    "desktop:build:universal": "node scripts/build-sidecar-universal.mjs && tauri build --target universal-apple-darwin --config src-tauri/tauri.universal.conf.json",
     "tauri": "tauri"
   },
   "dependencies": {

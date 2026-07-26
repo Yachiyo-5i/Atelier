@@ -13,8 +13,9 @@
 
 ```bash
 npm install
-npm run desktop:dev      # 开发:构建 sidecar + tauri dev
-npm run desktop:build    # 产出安装包(dmg / nsis)
+npm run desktop:dev                # 开发:构建 sidecar + tauri dev
+npm run desktop:build              # 当前架构安装包(dmg / nsis)
+npm run desktop:build:universal    # macOS Universal(arm64+x86_64 合一)
 ```
 
 依赖:Node ≥ 18、Rust 工具链(rustup)。
@@ -24,7 +25,7 @@ npm run desktop:build    # 产出安装包(dmg / nsis)
 - macOS: `~/Library/Application Support/com.yachiyo.atelier/data/`
 - Windows: `%APPDATA%\com.yachiyo.atelier\data\`
 
-CI:推送 `v*` tag 触发 `.github/workflows/desktop.yml`,矩阵产出 macOS(arm64/x64)与 Windows(x64)安装包。macOS 签名公证需配置 `APPLE_*` secrets(未配置则产出未签名包)。
+CI:推送 `v*` tag 触发 `.github/workflows/desktop.yml`,产出 **macOS Universal**(单个 dmg 同时支持 Apple Silicon 与 Intel,后端 sidecar 经 `lipo` 合并)与 **Windows x64**(nsis + msi)安装包,并自动创建 draft Release。macOS 签名公证需配置 `APPLE_*` secrets(未配置则产出未签名包);手动触发用 workflow_dispatch。
 
 ## Web 模式
 

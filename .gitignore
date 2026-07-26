@@ -12,3 +12,4 @@ dist/
 .claude/settings.local.json
 src-tauri/target/
 src-tauri/binaries/
+.sidecar-stage/

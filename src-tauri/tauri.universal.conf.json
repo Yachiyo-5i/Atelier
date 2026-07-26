@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "resources": {
+      "../.sidecar-stage/atelier-arm64": "sidecar/atelier-arm64",
+      "../.sidecar-stage/atelier-x64": "sidecar/atelier-x64"
+    }
+  }
+}
