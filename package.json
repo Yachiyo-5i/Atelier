@@ -13,13 +13,18 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "build": "node scripts/build-binary.mjs",
-    "build:binary": "node scripts/build-binary.mjs"
+    "build:binary": "node scripts/build-binary.mjs",
+    "sidecar": "node scripts/build-binary.mjs && node scripts/prepare-sidecar.mjs",
+    "desktop:dev": "npm run sidecar && tauri dev",
+    "desktop:build": "npm run sidecar && tauri build",
+    "tauri": "tauri"
   },
   "dependencies": {
     "express": "^4.21.2",
     "multer": "^2.2.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@yao-pkg/pkg": "^6.21.0",
     "esbuild": "^0.25.5"
   },

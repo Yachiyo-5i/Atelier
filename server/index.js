@@ -1269,6 +1269,17 @@ app.get('*', (_req, res) => {
 });
 
 async function main() {
+  // Shell mode: the desktop shell holds our stdin pipe. If the shell dies for
+  // any reason (crash, SIGKILL, normal quit), stdin closes — exit with it so
+  // no orphan backend keeps squatting on the port.
+  if (AUTH_TOKEN) {
+    process.stdin.resume();
+    const bail = () => process.exit(0);
+    process.stdin.on('end', bail);
+    process.stdin.on('close', bail);
+    process.stdin.on('error', bail);
+  }
+
   await ensureDataDirs();
   cleanupTempImages().then(
     (n) => n && console.log(`Cleaned ${n} expired temp image(s)`),
