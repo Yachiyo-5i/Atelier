@@ -4,11 +4,51 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::Mutex;
-use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 struct Backend(Mutex<Option<CommandChild>>);
+
+/// Window controls for the frameless custom titlebar.
+/// The webview runs on a remote (loopback) origin, so these are wired to the
+/// `desktop` capability instead of relying on injected JS globals.
+#[tauri::command]
+fn window_control(win: WebviewWindow, action: &str) {
+    match action {
+        "minimize" => {
+            let _ = win.minimize();
+        }
+        "toggle-maximize" => {
+            // Rust API has maximize/unmaximize only — flip on current state.
+            if win.is_maximized().unwrap_or(false) {
+                let _ = win.unmaximize();
+            } else {
+                let _ = win.maximize();
+            }
+        }
+        "close" => {
+            win.close().unwrap_or_else(|err| {
+                eprintln!("failed to close window: {err}");
+                win.app_handle().exit(0);
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Titlebar layout helper: on macOS the traffic lights overlay the page header,
+/// so the frontend shifts its content right (only needed in the desktop shell).
+#[tauri::command]
+fn desktop_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    }
+}
 
 fn main() {
     tauri::Builder::default()
@@ -21,6 +61,7 @@ fn main() {
             }
         }))
         .manage(Backend(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![window_control, desktop_platform])
         .setup(|app| {
             let token = uuid::Uuid::new_v4().simple().to_string();
             let data_home = app.path().app_data_dir()?;
@@ -57,15 +98,22 @@ fn main() {
                                 let url = format!("http://127.0.0.1:{port}/?token={token}");
                                 let handle2 = handle.clone();
                                 let _ = handle.run_on_main_thread(move || {
-                                    let win = WebviewWindowBuilder::new(
+                                    let builder = WebviewWindowBuilder::new(
                                         &handle2,
                                         "main",
                                         WebviewUrl::External(url.parse().unwrap()),
                                     )
                                     .title("Atelier")
                                     .inner_size(1280.0, 860.0)
-                                    .min_inner_size(760.0, 560.0)
-                                    .build();
+                                    .min_inner_size(760.0, 560.0);
+                                    #[cfg(target_os = "macos")]
+                                    let builder = builder
+                                        .decorations(true)
+                                        .hidden_title(true)
+                                        .title_bar_style(tauri::TitleBarStyle::Overlay);
+                                    #[cfg(not(target_os = "macos"))]
+                                    let builder = builder.decorations(false);
+                                    let win = builder.build();
                                     if let Err(err) = win {
                                         eprintln!("failed to open window: {err}");
                                         handle2.exit(1);

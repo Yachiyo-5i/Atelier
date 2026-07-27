@@ -133,13 +133,24 @@ code {
 /* ---------- Shell ---------- */
 
 .app {
+  --app-padding-top: 16px;
   height: 100vh;
   max-width: 1600px;
   margin: 0 auto;
-  padding: 16px;
+  padding: var(--app-padding-top) 16px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* macOS: keep the page header below the native traffic-light strip. */
+html.platform-macos .app {
+  --app-padding-top: 48px;
+}
+
+/* macOS: keep custom controls hidden */
+html.platform-macos .window-controls {
+  display: none;
 }
 
 .topbar {
@@ -152,6 +163,19 @@ code {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-panel);
   flex: none;
+  /* Frameless window: the whole header is the drag handle (JS-driven via
+     data-tauri-drag-region in the desktop shell; inert in a browser). */
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Interactive elements must stay clickable — the drag script skips BUTTON
+   tags on its own; this only guards text selection on the bar. */
+.topbar button,
+.topbar .pill {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .brand {
@@ -201,6 +225,62 @@ code {
   align-items: center;
   gap: 8px;
   flex: none;
+}
+
+/* ---------- Window controls (frameless shell) ---------- */
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line-soft);
+  flex: none;
+}
+
+.win-btn {
+  width: 30px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    background var(--dur-hover) var(--ease-out),
+    color var(--dur-hover) var(--ease-out);
+}
+
+.win-btn:hover {
+  background: var(--ink-4);
+  color: var(--text);
+}
+
+.win-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.win-btn--close:hover {
+  background: var(--coral);
+  color: #1f0d0a;
+}
+
+.win-btn__icon-restore {
+  display: none;
+}
+
+.win-btn.is-maximized .win-btn__icon-maximize {
+  display: none;
+}
+
+.win-btn.is-maximized .win-btn__icon-restore {
+  display: block;
 }
 
 .workspace {
@@ -2158,12 +2238,21 @@ body > .fancy-select__panel {
   }
 
   .topbar {
-    flex-direction: column;
-    align-items: stretch;
+    /* keep one row: the header is the window drag handle */
+    gap: 10px;
+  }
+
+  .brand-sub {
+    display: none;
   }
 
   .topbar-actions {
-    justify-content: space-between;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+
+  .topbar-actions .pill {
+    display: none;
   }
 
   .shot__menu {
@@ -2219,7 +2308,8 @@ body > .fancy-select__panel {
   }
 
   .app {
-    padding: 12px;
+    --app-padding-top: 12px;
+    padding: var(--app-padding-top) 12px 12px;
     gap: 12px;
   }
 
