@@ -25,7 +25,7 @@ npm run desktop:build:universal    # macOS Universal(arm64+x86_64 合一)
 - macOS: `~/Library/Application Support/com.yachiyo.atelier/data/`
 - Windows: `%APPDATA%\com.yachiyo.atelier\data\`
 
-CI:推送 `main` 或 `v*` tag 会自动触发 `.github/workflows/desktop.yml`,产出 **macOS Universal**(单个 dmg 同时支持 Apple Silicon 与 Intel,后端 sidecar 经 `lipo` 合并)与 **Windows x64**(nsis + msi)安装包,并自动创建 draft Release。`v*` tag 使用版本标签,`main` push 和 workflow_dispatch 使用 `build-<run number>` 标签。macOS 签名公证需配置 `APPLE_*` secrets(未配置则产出未签名包)。
+CI:推送 `main` 或 `v*` tag 会自动触发 `.github/workflows/desktop.yml`,产出 **macOS Universal**(单个 dmg 同时支持 Apple Silicon 与 Intel,后端 sidecar 经 `lipo` 合并)与 **Windows x64**(nsis + msi)安装包,并自动发布 GitHub Release。`v*` tag 使用版本标签,`main` push 和 workflow_dispatch 使用 `build-<run number>` 标签。macOS 签名公证需配置 `APPLE_*` secrets(未配置则产出未签名包)。
 
 ## Web 模式
 
